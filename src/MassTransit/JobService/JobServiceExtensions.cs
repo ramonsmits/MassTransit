@@ -202,5 +202,27 @@ namespace MassTransit
                 Reason = reason ?? "Unspecified"
             });
         }
+
+        /// <summary>
+        /// Retry a job if the job exists and is in a state that can be retried.
+        /// </summary>
+        /// <param name="publishEndpoint"></param>
+        /// <param name="jobId"></param>
+        /// <returns></returns>
+        public static Task RetryJob(this IPublishEndpoint publishEndpoint, Guid jobId)
+        {
+            return publishEndpoint.Publish<RetryJob>(new RetryJobCommand { JobId = jobId });
+        }
+
+        /// <summary>
+        /// Finalize a job, removing any faulted job attempts, so that it can be removed from the saga repository
+        /// </summary>
+        /// <param name="publishEndpoint"></param>
+        /// <param name="jobId"></param>
+        /// <returns></returns>
+        public static Task FinalizeJob(this IPublishEndpoint publishEndpoint, Guid jobId)
+        {
+            return publishEndpoint.Publish<FinalizeJob>(new FinalizeJobCommand { JobId = jobId });
+        }
     }
 }

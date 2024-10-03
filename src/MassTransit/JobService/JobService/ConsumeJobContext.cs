@@ -3,6 +3,7 @@ namespace MassTransit.JobService
 {
     using System;
     using System.Diagnostics;
+    using System.Diagnostics.CodeAnalysis;
     using System.Threading;
     using System.Threading.Tasks;
     using Context;
@@ -24,6 +25,7 @@ namespace MassTransit.JobService
         readonly Uri _instanceAddress;
         readonly CancellationTokenSource _source;
         readonly Stopwatch _stopwatch;
+        string? _cancellationReason;
         JobProgressBuffer? _updateBuffer;
 
         public ConsumeJobContext(ConsumeContext<StartJob> context, Uri instanceAddress, TJob job, TimeSpan jobTimeout, ProgressBufferSettings bufferSettings)
@@ -68,9 +70,9 @@ namespace MassTransit.JobService
             _source.Dispose();
         }
 
-        public async Task NotifyCanceled(string? reason = null)
+        public async Task NotifyCanceled()
         {
-            LogContext.Debug?.Log("Job Canceled: {JobId} {AttemptId} ({RetryAttempt})", JobId, AttemptId, RetryAttempt);
+            LogContext.Debug?.Log("Job Canceled: {JobId} {AttemptId} ({RetryAttempt}) {Reason}", JobId, AttemptId, RetryAttempt, _cancellationReason);
 
             if (_updateBuffer != null)
                 await _updateBuffer.Flush().ConfigureAwait(false);
@@ -79,23 +81,35 @@ namespace MassTransit.JobService
             {
                 JobId = JobId,
                 AttemptId = AttemptId,
-                RetryAttempt = RetryAttempt,
                 Timestamp = DateTime.UtcNow,
+                Reason = _cancellationReason ?? JobCancellationReasons.ConsumerInitiated
             }).ConfigureAwait(false);
         }
 
-        public Task NotifyStarted()
+        public async Task NotifyStarted()
         {
             LogContext.Debug?.Log("Job Started: {JobId} {AttemptId} ({RetryAttempt})", JobId, AttemptId, RetryAttempt);
 
-            return Notify<JobAttemptStarted>(new JobAttemptStartedEvent
+            var timestamp = DateTime.UtcNow;
+
+            await Notify<JobAttemptStarted>(new JobAttemptStartedEvent
             {
                 JobId = JobId,
                 AttemptId = AttemptId,
                 RetryAttempt = RetryAttempt,
-                Timestamp = DateTime.UtcNow,
+                Timestamp = timestamp,
                 InstanceAddress = _instanceAddress
-            });
+            }).ConfigureAwait(false);
+
+            var endpoint = await _context.ReceiveContext.PublishEndpointProvider.GetPublishSendEndpoint<JobStarted<TJob>>().ConfigureAwait(false);
+
+            await endpoint.Send<JobStarted<TJob>>(new JobStartedEvent<TJob>
+            {
+                JobId = JobId,
+                AttemptId = AttemptId,
+                RetryAttempt = RetryAttempt,
+                Timestamp = timestamp
+            }, CancellationToken.None).ConfigureAwait(false);
         }
 
         public async Task NotifyCompleted()
@@ -165,7 +179,7 @@ namespace MassTransit.JobService
             });
         }
 
-        public bool TryGetJobState<T>(out T? jobState)
+        public bool TryGetJobState<T>([NotNullWhen(true)] out T? jobState)
             where T : class
         {
             if (_context.Message.JobState != null)
@@ -186,8 +200,9 @@ namespace MassTransit.JobService
             await endpoint.Send(message, CancellationToken.None).ConfigureAwait(false);
         }
 
-        public void Cancel()
+        public void Cancel(string? reason)
         {
+            _cancellationReason = reason;
             _source.Cancel();
         }
     }

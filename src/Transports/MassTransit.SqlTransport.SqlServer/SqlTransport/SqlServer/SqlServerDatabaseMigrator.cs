@@ -1042,6 +1042,28 @@ BEGIN
     RETURN @outMessageDeliveryId;
 END";
 
+        const string SqlFnTouchQueue = @"
+CREATE OR ALTER PROCEDURE {0}.TouchQueue
+    @queueName varchar(256)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @queueId bigint
+    SELECT @queueId = q.Id
+    FROM {0}.Queue q
+    WHERE q.Name = @queueName AND q.Type = 1;
+
+    IF @queueId IS NULL
+    BEGIN
+        THROW 50000, 'Queue not found', 1;
+    END;
+
+    INSERT INTO {0}.QueueMetricCapture (Captured, QueueId, ConsumeCount, ErrorCount, DeadLetterCount)
+        VALUES (GETUTCDATE(), @queueId, 0, 0, 0);
+
+END";
+
         const string SqlFnPurgeQueue = @"
 CREATE OR ALTER PROCEDURE {0}.PurgeQueue
     @queueName varchar(256)
@@ -1058,7 +1080,7 @@ BEGIN
         INTO @DeletedMessages
         FROM {0}.MessageDelivery mdx
             INNER JOIN {0}.queue q on mdx.queueid = q.Id
-        WHERE q.name = 'input-queue'
+        WHERE q.name = @queueName
 
     DELETE FROM {0}.Message
         FROM {0}.Message m
@@ -1404,15 +1426,15 @@ AS
 BEGIN
     WITH expired AS (SELECT q.Id, q.name, DATEADD(second, -q.autodelete, GETUTCDATE()) as expires_at
                      FROM {0}.Queue q
-                     WHERE q.autodelete IS NOT NULL AND DATEADD(second, -q.autodelete, GETUTCDATE()) > updated),
+                     WHERE q.Type = 1 AND  q.AutoDelete IS NOT NULL AND DATEADD(second, -q.AutoDelete, GETUTCDATE()) > Updated),
          metrics AS (SELECT qm.queueid, MAX(starttime) as start_time
                      FROM {0}.queuemetric qm
-                              INNER JOIN expired q2 on q2.id = qm.queueid
+                              INNER JOIN expired q2 on q2.Id = qm.QueueId
                      WHERE DATEADD(second, duration, starttime) > q2.expires_at
                      GROUP BY qm.queueid)
     DELETE FROM {0}.Queue
     FROM {0}.Queue qd
-    INNER JOIN expired qdx ON qdx.Id = qd.Id
+    INNER JOIN expired qdx ON qdx.Name = qd.Name
         WHERE qdx.Id NOT IN (SELECT QueueId FROM metrics);
 
 END
@@ -1422,7 +1444,7 @@ END
             CREATE OR ALTER VIEW {0}.Queues
             AS
             SELECT x.QueueName,
-                   MAX(IIF(x.QueueAutoDelete = 1, 1, 0)) AS QueueAutoDelete,
+                   MAX(x.QueueAutoDelete)                AS QueueAutoDelete,
                    SUM(x.MessageReady)                   AS Ready,
                    SUM(x.MessageScheduled)               AS Scheduled,
                    SUM(x.MessageError)                   AS Errored,
@@ -1434,7 +1456,7 @@ END
                    MAX(x.StartTime)                      AS CountStartTime,
                    ISNULL(MAX(x.Duration), 0)            AS CountDuration
             FROM (SELECT q.Name                                              AS QueueName,
-                         IIF(q.AutoDelete = 1, 1, 0)                         AS QueueAutoDelete,
+                         q.AutoDelete                                        AS QueueAutoDelete,
                          qm.ConsumeCount,
                          qm.ErrorCount,
                          qm.DeadLetterCount,
@@ -1480,6 +1502,20 @@ END
                                               AND qm.StartTime >= DATEADD(MINUTE, -5, GETUTCDATE())) qm
                                       WHERE qm.RowNum = 1) qm ON qm.QueueId = q.Id) x
             GROUP BY x.QueueName;
+            """;
+
+        const string SqlFnSubscriptionsView = """
+            CREATE OR ALTER VIEW {0}.Subscriptions
+            AS
+                SELECT t.name as TopicName, 'topic' as DestinationType,  t2.name as DestinationName, ts.SubType as SubscriptionType, ts.RoutingKey
+                FROM {0}.topic t
+                         JOIN {0}.TopicSubscription ts ON t.id = ts.sourceid
+                         JOIN {0}.topic t2 on t2.id = ts.destinationid
+                UNION
+                SELECT t.name as TopicName, 'queue' as DestinationType, q.name as DestinationName, qs.SubType as SubscriptionType, qs.RoutingKey
+                FROM {0}.queuesubscription qs
+                         LEFT JOIN {0}.queue q on qs.destinationid = q.id
+                         LEFT JOIN {0}.topic t on qs.sourceid = t.id;
             """;
 
         readonly ILogger<SqlServerDatabaseMigrator> _logger;
@@ -1536,7 +1572,9 @@ END
                 await connection.Connection.ExecuteScalarAsync<int>(string.Format(SqlFnRequeueMessages, options.Schema)).ConfigureAwait(false);
                 await connection.Connection.ExecuteScalarAsync<int>(string.Format(SqlFnProcessMetrics, options.Schema)).ConfigureAwait(false);
                 await connection.Connection.ExecuteScalarAsync<int>(string.Format(SqlFnPurgeTopology, options.Schema)).ConfigureAwait(false);
+                await connection.Connection.ExecuteScalarAsync<int>(string.Format(SqlFnTouchQueue, options.Schema)).ConfigureAwait(false);
                 await connection.Connection.ExecuteScalarAsync<int>(string.Format(SqlFnQueuesView, options.Schema)).ConfigureAwait(false);
+                await connection.Connection.ExecuteScalarAsync<int>(string.Format(SqlFnSubscriptionsView, options.Schema)).ConfigureAwait(false);
 
                 _logger.LogDebug("Transport infrastructure in schema {Schema} created (or updated)", options.Schema);
             }
