@@ -46,7 +46,7 @@ namespace MassTransit.RabbitMqTransport.Configuration
 
                 x.Ignore<AuthenticationFailureException>();
 
-                x.Exponential(1000, TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(3));
+                x.Exponential(int.MaxValue, TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(3));
             });
 
             _connectionContext = new Recycle<IConnectionContextSupervisor>(() => new ConnectionContextSupervisor(this, topologyConfiguration));

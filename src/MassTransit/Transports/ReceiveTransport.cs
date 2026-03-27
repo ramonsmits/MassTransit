@@ -144,10 +144,29 @@ namespace MassTransit.Transports
                             if (!IsStopping)
                                 await RunTransport().ConfigureAwait(false);
                         }
+                        catch (OperationCanceledException exception) when (exception.CancellationToken == Stopping)
+                        {
+                            // Transport is intentionally stopping — don't retry
+                        }
                         catch (OperationCanceledException exception)
                         {
-                            if (retryContext == null)
-                                await NotifyFaulted(exception).ConfigureAwait(false);
+                            // Connection was lost (not an intentional stop) — treat as retryable
+                            LogContext.Debug?.Log(exception, "ReceiveTransport connection cancelled, will retry: {InputAddress}", _context.InputAddress);
+
+                            await NotifyFaulted(exception).ConfigureAwait(false);
+
+                            if (retryContext != null)
+                            {
+                                retryContext = retryContext.CanRetry(exception, out RetryContext<TransportStoppingContext> nextRetryContext)
+                                    ? nextRetryContext
+                                    : null;
+                            }
+
+                            if (retryContext == null && !policyContext.CanRetry(exception, out retryContext))
+                            {
+                                LogContext.Error?.Log(exception, "ReceiveTransport Cannot Retry: {InputAddress}", _context.InputAddress);
+                                break;
+                            }
                         }
                         catch (Exception exception)
                         {
